@@ -2,7 +2,7 @@
   "openapi": "3.0.0",
   "info": {
     "title": "Warpgate Web Admin",
-    "version": "v0.30.0-7-g3617129e-modified"
+    "version": "v0.30.0-1-gbca057f6-modified"
   },
   "servers": [
     {
@@ -6352,6 +6352,9 @@
           "show_session_menu": {
             "type": "boolean"
           },
+          "http_explicit_routing_only": {
+            "type": "boolean"
+          },
           "password_policy": {
             "$ref": "#/components/schemas/PasswordPolicy"
           },
@@ -6491,6 +6494,7 @@
           "target_click_action",
           "open_targets_in_new_tab",
           "show_session_menu",
+          "http_explicit_routing_only",
           "password_policy",
           "record_scp",
           "record_desktop_keyboard_input",
@@ -6573,6 +6577,9 @@
             "$ref": "#/components/schemas/OpenTargetsInNewTabMode"
           },
           "show_session_menu": {
+            "type": "boolean"
+          },
+          "http_explicit_routing_only": {
             "type": "boolean"
           },
           "password_policy": {

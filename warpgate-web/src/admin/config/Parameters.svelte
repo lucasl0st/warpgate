@@ -648,6 +648,25 @@
                                     sessions, allowing users to log out or
                                     return back to the home page.
                                 </HelpText>
+
+                                <label
+                                    for="httpExplicitRoutingOnly"
+                                    class="d-flex align-items-center"
+                                >
+                                    <Input
+                                        id="httpExplicitRoutingOnly"
+                                        class="mb-0 me-2"
+                                        type="switch"
+                                        bind:checked={parameters.httpExplicitRoutingOnly}
+                                    />
+                                    <div>Only route requests that explicitly address a target</div>
+                                </label>
+                                <HelpText>
+                                    When enabled, requests that do not address a
+                                    target (via a bound subdomain or
+                                    ?warpgate-target) show the portal instead of
+                                    the last target accessed in the session.
+                                </HelpText>
                             </Section>
 
                             <Section id="login" title="Login">

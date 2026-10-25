@@ -78,6 +78,7 @@ struct ParameterValues {
     pub target_click_action: Parameters::TargetClickAction,
     pub open_targets_in_new_tab: Parameters::OpenTargetsInNewTabMode,
     pub show_session_menu: bool,
+    pub http_explicit_routing_only: bool,
     pub password_policy: PasswordPolicy,
     pub max_api_token_duration_seconds: Option<i64>,
     pub record_scp: bool,
@@ -133,6 +134,7 @@ struct ParameterUpdate {
     pub target_click_action: Option<Parameters::TargetClickAction>,
     pub open_targets_in_new_tab: Option<Parameters::OpenTargetsInNewTabMode>,
     pub show_session_menu: Option<bool>,
+    pub http_explicit_routing_only: Option<bool>,
     pub password_policy: Option<PasswordPolicy>,
     #[oai(deserialize_with = "parse_nullable", validator(minimum(value = "1")))]
     pub max_api_token_duration_seconds: Option<Option<i64>>,
@@ -256,6 +258,7 @@ impl Api {
             target_click_action: parameters.target_click_action,
             open_targets_in_new_tab: parameters.open_targets_in_new_tab,
             show_session_menu: parameters.show_session_menu,
+            http_explicit_routing_only: parameters.http_explicit_routing_only,
             password_policy: parameters.password_policy(),
             max_api_token_duration_seconds: parameters.max_api_token_duration_seconds,
             record_scp: parameters.record_scp,
@@ -372,6 +375,8 @@ impl Api {
         parameters.target_click_action = body.target_click_action.map_or(NotSet, Set);
         parameters.open_targets_in_new_tab = body.open_targets_in_new_tab.map_or(NotSet, Set);
         parameters.show_session_menu = body.show_session_menu.map_or(NotSet, Set);
+        parameters.http_explicit_routing_only =
+            body.http_explicit_routing_only.map_or(NotSet, Set);
         parameters.max_api_token_duration_seconds =
             body.max_api_token_duration_seconds.map_or(NotSet, Set);
         parameters.record_scp = body.record_scp.map_or(NotSet, Set);

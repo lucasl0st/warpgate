@@ -192,10 +192,14 @@ async fn get_target_for_request(
         None
     };
 
+    let explicit_routing_only = ctx.parameters().await?.http_explicit_routing_only;
+
     let selected_target_name = if let Some(warpgate_target) = params.warpgate_target {
         Some(warpgate_target)
     } else if let Some(ref rebound_target) = host_based_target {
         Some(rebound_target.name.clone())
+    } else if explicit_routing_only {
+        None
     } else {
         session.get_target_name()
     };
