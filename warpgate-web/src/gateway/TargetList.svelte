@@ -248,6 +248,9 @@
         >
             <span class="me-auto">
                 <div class="d-flex align-items-center gap-2">
+                    {#if target.icon}
+                        <img class="target-icon" src={target.icon} alt="">
+                    {/if}
                     {target.name}
                 </div>
                 {#if target.description}
@@ -401,5 +404,12 @@
         display: flex;
         align-items: center;
         cursor: pointer;
+
+        .target-icon {
+            width: 1.5rem;
+            height: 1.5rem;
+            flex: none;
+            object-fit: contain;
+        }
     }
 </style>

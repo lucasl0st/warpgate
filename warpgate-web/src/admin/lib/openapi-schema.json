@@ -2,7 +2,7 @@
   "openapi": "3.0.0",
   "info": {
     "title": "Warpgate Web Admin",
-    "version": "v0.30.0-1-g79eb0fb8-modified"
+    "version": "v0.30.0-2-gb0bdcda1-modified"
   },
   "servers": [
     {
@@ -7916,6 +7916,9 @@
           "ticket_max_uses": {
             "type": "integer",
             "format": "int16"
+          },
+          "icon": {
+            "type": "string"
           }
         }
       },
@@ -7942,6 +7945,10 @@
           },
           "description": {
             "type": "string"
+          },
+          "icon": {
+            "type": "string",
+            "description": "Custom icon shown on the gateway dashboard, as a `data:image/…` URL."
           },
           "options": {
             "$ref": "#/components/schemas/TargetOptions"

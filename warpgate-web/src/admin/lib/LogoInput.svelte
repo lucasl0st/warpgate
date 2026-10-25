@@ -12,9 +12,16 @@
          * data URL replaces it.
          */
         value?: string | null
+        helpText?: string
+        alt?: string
     }
 
-    let { etag, value = $bindable() }: Props = $props()
+    let {
+        etag,
+        value = $bindable(),
+        helpText = 'Replaces the Warpgate logo in the header and on the login page. PNG, JPEG, GIF, WebP or SVG up to 4 MB.',
+        alt = 'Logo',
+    }: Props = $props()
 
     let error: string | undefined = $state()
     let input: HTMLInputElement | undefined = $state()
@@ -52,12 +59,7 @@
 
 <div class="d-flex align-items-center gap-3 mb-2">
     {#if preview}
-        <img
-            src={preview}
-            alt="Logo"
-            class="d-block me-auto"
-            style="height: 32px"
-        >
+        <img src={preview} {alt} class="d-block me-auto" style="height: 32px">
     {:else}
         <div class="text-muted me-auto">No image selected</div>
     {/if}
@@ -96,6 +98,5 @@
     <div class="text-danger mt-2">{error}</div>
 {/if}
 <HelpText>
-    Replaces the Warpgate logo in the header and on the login page. PNG, JPEG,
-    GIF, WebP or SVG up to 4 MB.
+    {helpText}
 </HelpText>

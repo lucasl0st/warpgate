@@ -60,6 +60,7 @@ pub struct Model {
     pub ticket_require_approval: bool,
     pub ticket_max_uses: Option<i16>,
     pub require_approval: bool,
+    pub icon: Option<String>, // data URI
 }
 
 impl Related<super::Role::Entity> for Entity {
@@ -108,6 +109,7 @@ impl TryFrom<Model> for Target {
             ticket_require_approval: model.ticket_require_approval,
             ticket_max_uses: model.ticket_max_uses,
             require_approval: model.require_approval,
+            icon: model.icon,
         })
     }
 }

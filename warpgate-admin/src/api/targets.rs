@@ -13,7 +13,8 @@ use warpgate_common::{
 use warpgate_common_http::errors::invalid_field;
 use warpgate_db_entities::Target::fuzzy_filter_targets;
 use warpgate_db_entities::{
-    KnownHost, Role, Target, TargetGroup, TargetRoleAssignment, Ticket, TicketRequest,
+    KnownHost, Parameters::LogoImage, Role, Target, TargetGroup, TargetRoleAssignment, Ticket,
+    TicketRequest,
 };
 
 use super::AdminContext;
@@ -42,6 +43,8 @@ pub(crate) fn maybe_redacted_target(
 struct TargetDataRequest {
     name: String,
     description: Option<String>,
+    /// Custom icon shown on the gateway dashboard, as a `data:image/…` URL.
+    icon: Option<String>,
     options: TargetOptions,
     rate_limit_bytes_per_second: Option<u32>,
     group_id: Option<Uuid>,
@@ -123,11 +126,23 @@ impl ListApi {
             )));
         }
 
+        if body
+            .icon
+            .as_deref()
+            .is_some_and(|icon| LogoImage::from_data_url(icon).is_none())
+        {
+            return Ok(CreateTargetResponse::BadRequest(invalid_field(
+                "icon",
+                "icon is not a valid image data URL",
+            )));
+        }
+
         let db = &admin.services().db;
         let values = Target::ActiveModel {
             id: Set(Uuid::new_v4()),
             name: Set(body.name.clone()),
             description: Set(body.description.clone().unwrap_or_default()),
+            icon: Set(body.icon.clone()),
             kind: Set((&body.options).into()),
             options: Set(serialize_options_for_storage(body.options.clone())?),
             rate_limit_bytes_per_second: Set(None),
@@ -233,6 +248,15 @@ impl DetailApi {
             return Ok(UpdateTargetResponse::BadRequest);
         }
 
+        if body
+            .icon
+            .as_deref()
+            .is_some_and(|icon| LogoImage::from_data_url(icon).is_none())
+        {
+            warn!("Rejecting request: target icon is not an image data URL");
+            return Ok(UpdateTargetResponse::BadRequest);
+        }
+
         let db = &admin.services().db;
 
         let Some(target) = Target::Entity::find_by_id(id.0).one(db).await? else {
@@ -251,6 +275,7 @@ impl DetailApi {
         let mut model: Target::ActiveModel = target.into();
         model.name = Set(body.name.clone());
         model.description = Set(body.description.clone().unwrap_or_default());
+        model.icon = Set(body.icon.clone());
         model.options = Set(serialize_options_for_storage(body.options.clone())?);
         model.rate_limit_bytes_per_second = Set(body.rate_limit_bytes_per_second.map(i64::from));
         model.group_id = Set(body.group_id);

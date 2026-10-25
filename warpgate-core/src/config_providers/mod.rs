@@ -465,6 +465,7 @@ mod tests {
             ticket_require_approval: false,
             require_approval: false,
             ticket_max_uses: None,
+            icon: None,
         }
     }
 
@@ -540,6 +541,7 @@ mod tests {
             ticket_require_approval: Set(false),
             ticket_max_uses: Set(None),
             require_approval: Set(require_approval),
+            icon: Set(None),
         }
         .insert(&db)
         .await

@@ -15,6 +15,7 @@
         type Target,
         type TargetGroup,
     } from 'admin/lib/api'
+    import LogoInput from 'admin/lib/LogoInput.svelte'
     import Section from 'admin/lib/Section.svelte'
     import SectionedForm from 'admin/lib/SectionedForm.svelte'
     import { adminPermissions } from 'admin/lib/store'
@@ -265,6 +266,17 @@
 
                         <FormGroup floating label="Description">
                             <Input bind:value={target.description} />
+                        </FormGroup>
+
+                        <FormGroup>
+                            <label>
+                                Icon
+                                <LogoInput
+                                    bind:value={target.icon}
+                                    helpText="Shown next to the target name on the gateway dashboard. PNG, JPEG, GIF, WebP or SVG up to 4 MB."
+                                    alt=""
+                                />
+                            </label>
                         </FormGroup>
                     </Section>
 

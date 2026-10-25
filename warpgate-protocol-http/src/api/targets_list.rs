@@ -29,6 +29,7 @@ pub struct TargetSnapshot {
     pub id: Uuid,
     pub name: String,
     pub description: String,
+    pub icon: Option<String>,
     pub kind: Target::TargetKind,
     pub external_host: Option<String>,
     pub group: Option<GroupInfo>,
@@ -95,6 +96,7 @@ impl Api {
                     id: t.id,
                     name: t.name.clone(),
                     description: t.description.clone(),
+                    icon: t.icon.clone(),
                     kind: (&t.options).into(),
                     external_host: t.options.external_host().map(ToString::to_string),
                     default_database_name: t

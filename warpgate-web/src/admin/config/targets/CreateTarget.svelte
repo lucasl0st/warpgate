@@ -8,6 +8,7 @@
         type TargetOptions,
         TlsMode,
     } from 'admin/lib/api'
+    import LogoInput from 'admin/lib/LogoInput.svelte'
     import { adminPermissions } from 'admin/lib/store'
     import { stringifyError } from 'common/errors'
     import { TargetKind } from 'gateway/lib/api'
@@ -22,6 +23,7 @@
 
     let error: string | null = $state(null)
     let name = $state('')
+    let icon: string | null | undefined = $state()
     let groups: TargetGroup[] = $state([])
     let selectedGroupId: string | undefined = $state()
 
@@ -121,6 +123,7 @@
             const target = await api.createTarget({
                 targetDataRequest: {
                     name,
+                    icon: icon ?? undefined,
                     options,
                     groupId: selectedGroupId,
                     requireApproval: false,
@@ -175,6 +178,17 @@
                     required
                     bind:value={name}
                 >
+            </FormGroup>
+
+            <FormGroup>
+                <label>
+                    Icon
+                    <LogoInput
+                        bind:value={icon}
+                        helpText="Shown next to the target name on the gateway dashboard. PNG, JPEG, GIF, WebP or SVG up to 4 MB."
+                        alt=""
+                    />
+                </label>
             </FormGroup>
 
             {#if groups.length > 0}

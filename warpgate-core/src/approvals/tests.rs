@@ -948,6 +948,7 @@ pub(crate) async fn seed_ticket(
         ticket_require_approval: Set(false),
         ticket_max_uses: Set(None),
         require_approval: Set(true),
+        icon: Set(None),
     })
     .exec(db)
     .await
@@ -1717,6 +1718,7 @@ mod polled_gate {
             ticket_require_approval: false,
             require_approval: true,
             ticket_max_uses: None,
+            icon: None,
         }
     }
 

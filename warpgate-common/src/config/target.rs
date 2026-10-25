@@ -484,6 +484,7 @@ pub struct Target {
     pub ticket_require_approval: bool,
     pub require_approval: bool,
     pub ticket_max_uses: Option<i16>,
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Union)]
