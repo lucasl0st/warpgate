@@ -31,6 +31,11 @@ def create_target(api, port):
                     kind="Token", token="upstream-token",
                 ),
             ),
+            identity=sdk.KubernetesTargetIdentity(
+                sdk.KubernetesTargetIdentityKubernetesTargetSharedIdentity(
+                    kind="Shared"
+                )
+            ),
         )),
     ))
 

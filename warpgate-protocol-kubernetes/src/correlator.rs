@@ -7,15 +7,20 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use warpgate_common::auth::{AuthResult, AuthStateUserInfo, RememberApprovalBy};
-use warpgate_common::{TargetKubernetesOptions, UserSessionId, WarpgateError};
+use warpgate_common::{
+    KubernetesTargetIdentity, TargetKubernetesOptions, TargetOptions, UserSessionId,
+    WarpgateError,
+};
 use warpgate_common_http::logging::get_client_ip;
 use warpgate_core::approvals::{GatedConnection, admit_target_session};
 use warpgate_core::{
-    AdmittedTarget, Services, State, TargetAuthorization, UserSessionStateInit,
+    AdmittedTarget, ConfigProvider, Services, State, TargetAuthorization, UserSessionStateInit,
     WarpgateServerHandle,
 };
 
-use crate::server::auth::{KubernetesIdentity, authorize_kubernetes_target, unauthorized};
+use crate::server::auth::{
+    KubernetesIdentity, UpstreamIdentity, authorize_kubernetes_target, unauthorized,
+};
 use crate::session_handle::KubernetesSessionHandle;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -26,6 +31,10 @@ struct CorrelationKey {
     // Ticket sessions must never share admission with another ticket or a
     // normal login by the same user.
     ticket_id: Option<Uuid>,
+    /// Fingerprint of the target's `identity` config. The session freezes the
+    /// identity resolved at creation, so a changed config must change the key
+    /// or the stale session keeps serving the old identity until it ages out.
+    identity_fingerprint: String,
 }
 
 impl CorrelationKey {
@@ -37,11 +46,42 @@ impl CorrelationKey {
     ) -> Self {
         Self {
             user_id: identity.user_info().id,
-            target_name,
             ip: get_client_ip(request, services).await,
             ticket_id: identity.ticket_id(),
+            identity_fingerprint: target_identity_fingerprint(services, &target_name).await,
+            target_name,
         }
     }
+}
+
+/// Fingerprint of a target's upstream-identity config, part of the
+/// correlation key so that a config change invalidates every session frozen
+/// under the old identity.
+fn identity_fingerprint(options: &TargetOptions) -> String {
+    match options {
+        TargetOptions::Kubernetes(k8s) => match &k8s.identity {
+            KubernetesTargetIdentity::Shared(_) => "shared".to_string(),
+            KubernetesTargetIdentity::Impersonate(identity) => format!(
+                "impersonate:{}:{}",
+                identity.user_prefix, identity.group_prefix
+            ),
+        },
+        _ => String::new(),
+    }
+}
+
+/// [`identity_fingerprint`] of the named target. A lookup failure degrades to
+/// the constant used for a missing target: the request still goes through the
+/// usual authorization, where a genuinely broken lookup is reported.
+async fn target_identity_fingerprint(services: &Services, target_name: &str) -> String {
+    services
+        .config_provider
+        .get_target_by_name(target_name)
+        .await
+        .ok()
+        .flatten()
+        .map(|target| identity_fingerprint(&target.options))
+        .unwrap_or_default()
 }
 
 /// Approval refusale are remembered because otherwise every API request would trigger a new one
@@ -49,6 +89,20 @@ impl CorrelationKey {
 const REFUSAL_MEMORY: Duration = Duration::from_secs(5);
 
 pub type AdmittedSession = Arc<AdmittedTarget<TargetKubernetesOptions>>;
+
+/// An admitted session and the identity its requests carry to the cluster.
+pub struct AdmittedKubernetesSession {
+    pub admitted: AdmittedSession,
+    pub identity: UpstreamIdentity,
+}
+
+impl std::ops::Deref for AdmittedKubernetesSession {
+    type Target = AdmittedSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.admitted
+    }
+}
 
 /// The outcome of the request that opened one correlated session. Requests that
 /// join a session in flight wait on the mutex, so a `kubectl` command's fan-out
@@ -60,7 +114,7 @@ enum Authorization {
     /// opening request that was dropped mid-approval.
     #[default]
     Pending,
-    Authorized(AdmittedSession),
+    Authorized(Arc<AdmittedKubernetesSession>),
     Denied,
 }
 
@@ -105,7 +159,7 @@ pub async fn correlated_authorization(
     services: &Services,
 ) -> poem::Result<(
     Arc<Mutex<WarpgateServerHandle>>,
-    AdmittedSession,
+    Arc<AdmittedKubernetesSession>,
     CancellationToken,
 )> {
     let user_info = identity.user_info();
@@ -189,6 +243,25 @@ pub async fn correlated_authorization(
         };
         return match resolved {
             Ok(resolved) => {
+                // Resolved before the (potentially long) approval wait, so a
+                // target whose identity cannot be built is refused without
+                // raising an approval for it.
+                let upstream_identity = match UpstreamIdentity::resolve(
+                    resolved.options(),
+                    resolved.user_info(),
+                    &services.db,
+                )
+                .await
+                {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        *authorization = Authorization::Denied;
+                        correlator.lock().await.evict(&key, &slot);
+                        settle_failed_attempt(services, &handle, session_id).await;
+                        return Err(error.into());
+                    }
+                };
+
                 // Closing the session also cancels an admin-approval wait.
                 let admission = tokio::select! {
                     biased;
@@ -213,8 +286,12 @@ pub async fn correlated_authorization(
                         });
                     }
                 };
-                *authorization = Authorization::Authorized(admitted.clone());
-                Ok((handle, admitted, closed))
+                let session = Arc::new(AdmittedKubernetesSession {
+                    admitted,
+                    identity: upstream_identity,
+                });
+                *authorization = Authorization::Authorized(session.clone());
+                Ok((handle, session, closed))
             }
             Err(error) => {
                 // A denied attempt is not cached: the requests waiting on this
@@ -272,7 +349,7 @@ async fn join_session(
 ) -> poem::Result<
     Option<(
         Arc<Mutex<WarpgateServerHandle>>,
-        AdmittedSession,
+        Arc<AdmittedKubernetesSession>,
         CancellationToken,
     )>,
 > {
@@ -434,6 +511,7 @@ impl RequestCorrelator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use warpgate_common::{KubernetesTargetAuth, KubernetesTargetImpersonateIdentity, Tls};
 
     #[test]
     fn a_cancelled_entry_is_not_live() {
@@ -456,5 +534,43 @@ mod tests {
         let closed = CancellationToken::new();
         let created = Instant::now() - Duration::from_secs(120);
         assert!(!entry_is_live(created, &closed, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn an_identity_config_change_changes_the_fingerprint() {
+        let k8s = |identity: KubernetesTargetIdentity| {
+            TargetOptions::Kubernetes(TargetKubernetesOptions {
+                cluster_url: String::new(),
+                tls: Tls::default(),
+                auth: KubernetesTargetAuth::default(),
+                identity,
+            })
+        };
+        let shared = k8s(KubernetesTargetIdentity::default());
+        let impersonate = k8s(KubernetesTargetIdentity::Impersonate(
+            KubernetesTargetImpersonateIdentity {
+                user_prefix: "wg-".into(),
+                group_prefix: "wg-".into(),
+            },
+        ));
+        let other_group_prefix = k8s(KubernetesTargetIdentity::Impersonate(
+            KubernetesTargetImpersonateIdentity {
+                user_prefix: "wg-".into(),
+                group_prefix: "wg-dev-".into(),
+            },
+        ));
+
+        assert_eq!(
+            identity_fingerprint(&shared),
+            identity_fingerprint(&shared)
+        );
+        assert_ne!(
+            identity_fingerprint(&shared),
+            identity_fingerprint(&impersonate)
+        );
+        assert_ne!(
+            identity_fingerprint(&impersonate),
+            identity_fingerprint(&other_group_prefix)
+        );
     }
 }

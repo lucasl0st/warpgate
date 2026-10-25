@@ -2,7 +2,7 @@
   "openapi": "3.0.0",
   "info": {
     "title": "Warpgate Web Admin",
-    "version": "v0.30.0-1-gbca057f6-modified"
+    "version": "v0.30.0-1-g79eb0fb8-modified"
   },
   "servers": [
     {
@@ -5958,6 +5958,92 @@
         "type": "object",
         "title": "KubernetesTargetIamRoleAuth"
       },
+      "KubernetesTargetIdentity": {
+        "type": "object",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/KubernetesTargetIdentity_KubernetesTargetSharedIdentity"
+          },
+          {
+            "$ref": "#/components/schemas/KubernetesTargetIdentity_KubernetesTargetImpersonateIdentity"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "Shared": "#/components/schemas/KubernetesTargetIdentity_KubernetesTargetSharedIdentity",
+            "Impersonate": "#/components/schemas/KubernetesTargetIdentity_KubernetesTargetImpersonateIdentity"
+          }
+        }
+      },
+      "KubernetesTargetIdentity_KubernetesTargetImpersonateIdentity": {
+        "allOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "Impersonate"
+                ],
+                "example": "Impersonate"
+              }
+            }
+          },
+          {
+            "$ref": "#/components/schemas/KubernetesTargetImpersonateIdentity"
+          }
+        ]
+      },
+      "KubernetesTargetIdentity_KubernetesTargetSharedIdentity": {
+        "allOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "Shared"
+                ],
+                "example": "Shared"
+              }
+            }
+          },
+          {
+            "$ref": "#/components/schemas/KubernetesTargetSharedIdentity"
+          }
+        ]
+      },
+      "KubernetesTargetImpersonateIdentity": {
+        "type": "object",
+        "title": "KubernetesTargetImpersonateIdentity",
+        "required": [
+          "user_prefix",
+          "group_prefix"
+        ],
+        "properties": {
+          "user_prefix": {
+            "type": "string",
+            "description": "Prepended to the Warpgate username; the result is the\n`Impersonate-User` header value. Non-empty, so the forwarded name\ncan never be a raw Warpgate name colliding with a cluster principal.",
+            "minLength": 1
+          },
+          "group_prefix": {
+            "type": "string",
+            "description": "Prepended to each active Warpgate role name; every name becomes one\n`Impersonate-Group` header.",
+            "minLength": 1
+          }
+        }
+      },
+      "KubernetesTargetSharedIdentity": {
+        "type": "object",
+        "title": "KubernetesTargetSharedIdentity"
+      },
       "KubernetesTargetTokenAuth": {
         "type": "object",
         "title": "KubernetesTargetTokenAuth",
@@ -7964,7 +8050,8 @@
         "required": [
           "cluster_url",
           "tls",
-          "auth"
+          "auth",
+          "identity"
         ],
         "properties": {
           "cluster_url": {
@@ -7975,6 +8062,9 @@
           },
           "auth": {
             "$ref": "#/components/schemas/KubernetesTargetAuth"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/KubernetesTargetIdentity"
           }
         }
       },

@@ -116,6 +116,18 @@ export const protocolInfo: Partial<Record<TargetKind, string>> = {
 
 * Client authenticates with a Warpgate-issued client certificate, a Warpgate API token, or an SSO/OIDC id-token (via kubelogin).
 
+## Upstream identity
+
+* By default requests carry the target credential's own identity.
+* Impersonation forwards requests as the Warpgate user and their active Warpgate roles,
+  each prefixed per the target's identity config. The target credential must then be
+  granted \`impersonate\` on \`users\` and \`groups\`, and the cluster's RBAC is applied
+  to the impersonated principals (for example, \`create\` on \`pods/exec\` on a role's
+  group for exec).
+* Both prefixes are required and non-empty: the forwarded name is always the
+  prefix plus the Warpgate name, so it can never collide with an un-prefixed
+  cluster principal (including the reserved \`system:*\` namespace).
+
 ## Kubernetes protocol
 
 * WebSocket/SPDY \`exec\`/\`attach\`/\`port-forward\` streams are supported.

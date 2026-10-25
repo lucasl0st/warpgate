@@ -25,7 +25,7 @@ use warpgate_core::recordings::{TerminalRecorder, TerminalRecordingStreamId};
 use warpgate_core::{Services, WarpgateServerHandle};
 
 use crate::audit::{StreamOperation, classify_mutating, classify_stream};
-use crate::correlator::{AdmittedSession, RequestCorrelator, correlated_authorization};
+use crate::correlator::{AdmittedKubernetesSession, RequestCorrelator, correlated_authorization};
 use crate::recording::{start_recording_api, start_recording_exec};
 use crate::server::UpstreamClientCache;
 use crate::server::auth::{
@@ -138,7 +138,7 @@ pub async fn handle_api_request(
         .path()
         .to_owned();
 
-    let (handle, admitted, closed) =
+    let (handle, session, closed) =
         correlated_authorization(correlator.0, req, identity, &target_name, ctx.services()).await?;
     // Close may have arrived after the correlator lookup.
     if closed.is_cancelled() {
@@ -160,11 +160,11 @@ pub async fn handle_api_request(
     // id is the one the log layer keys entries by — recordings key off the
     // target session id instead, and the two must not be confused.
     let audit_subject = {
-        let target = admitted.target();
+        let target = session.target();
         KubernetesAuditSubject {
             session_id: user_session_id.0,
-            user_id: admitted.user_info().id,
-            username: admitted.user_info().username.clone(),
+            user_id: session.user_info().id,
+            username: session.user_info().username.clone(),
             target_id: target.id,
             target_name: target.name.clone(),
         }
@@ -175,7 +175,7 @@ pub async fn handle_api_request(
             _handle_websocket_request_inner(
                 ws,
                 req,
-                admitted,
+                session,
                 &api_path,
                 &audit_subject,
                 ctx.services(),
@@ -192,7 +192,7 @@ pub async fn handle_api_request(
             _handle_normal_request_inner(
                 req,
                 body,
-                admitted,
+                session,
                 upstream_clients.0,
                 &api_path,
                 &audit_subject,
@@ -276,7 +276,7 @@ where
 async fn _handle_normal_request_inner(
     req: &Request,
     body: Body,
-    admitted: AdmittedSession,
+    session: Arc<AdmittedKubernetesSession>,
     upstream_clients: &UpstreamClientCache,
     api_path: &str,
     audit_subject: &KubernetesAuditSubject,
@@ -284,8 +284,8 @@ async fn _handle_normal_request_inner(
     closed: CancellationToken,
     handle: Arc<Mutex<WarpgateServerHandle>>,
 ) -> Result<Response, WarpgateError> {
-    let k8s_options = admitted.options();
-    let target_id = admitted.target().id;
+    let k8s_options = session.options();
+    let target_id = session.target().id;
     let client = upstream_clients
         .get_or_build(&target_id, k8s_options, || async {
             create_authenticated_client(k8s_options, services)
@@ -348,7 +348,7 @@ async fn _handle_normal_request_inner(
         .ok_or(WarpgateError::UserSessionEnded)?
         .context("reading request body")?;
 
-    let mut recorder_opt = match start_recording_api(&admitted.id(), &services.recordings).await {
+    let mut recorder_opt = match start_recording_api(&session.id(), &services.recordings).await {
         Ok(recorder) => recorder,
         Err(e) => {
             warn!("Failed to start recording: {}", e);
@@ -385,8 +385,18 @@ async fn _handle_normal_request_inner(
         }
     }
 
+    // Impersonation is derived from the authenticated user, never from the
+    // request: client-supplied impersonation headers were dropped above.
+    let impersonation = session.identity.impersonation_headers()?;
+    if let Some(pairs) = &impersonation {
+        for (name, value) in pairs {
+            request_builder = request_builder.header(name.clone(), value.clone());
+        }
+    }
+
     debug!(
         filtered_headers = ?redact_headers(&upstream_headers),
+        upstream_identity = ?session.identity,
         "Headers being sent to upstream Kubernetes API"
     );
 
@@ -567,14 +577,14 @@ async fn run_websocket_recording(recorder: TerminalRecorder, mut rx: mpsc::Recei
 async fn _handle_websocket_request_inner(
     ws: WebSocket,
     req: &Request,
-    admitted: AdmittedSession,
+    session: Arc<AdmittedKubernetesSession>,
     api_path: &str,
     audit_subject: &KubernetesAuditSubject,
     services: &Services,
     closed: CancellationToken,
     handle: Arc<Mutex<WarpgateServerHandle>>,
 ) -> anyhow::Result<impl IntoResponse> {
-    let k8s_options = admitted.options();
+    let k8s_options = session.options();
     let mut full_url = construct_target_url(req, api_path, k8s_options)?;
     if full_url.scheme() == "https" {
         let _ = full_url.set_scheme("wss");
@@ -596,7 +606,7 @@ async fn _handle_websocket_request_inner(
         .as_ref()
         .and_then(StreamOperation::recording_metadata)
     {
-        match start_recording_exec(&admitted.id(), &services.recordings, metadata).await {
+        match start_recording_exec(&session.id(), &services.recordings, metadata).await {
             Err(e) => {
                 error!("Failed to start recording: {}", e);
             }
@@ -616,17 +626,21 @@ async fn _handle_websocket_request_inner(
 
     let audit_subject = audit_subject.clone();
 
+    // No client headers are forwarded on this path, so the session identity is
+    // the only one that reaches the cluster.
+    let impersonation = session.identity.impersonation_headers()?;
+
     let ws_handler_inner = async move |socket: WebSocketStream| {
         // Keep the session handle alive if the websocket outlives its cache entry.
         let _session_handle = handle;
+        let mut request = client.get(full_url.clone());
+        if let Some(pairs) = &impersonation {
+            for (name, value) in pairs {
+                request = request.header(name.clone(), value.clone());
+            }
+        }
         let client_response = closed
-            .run_until_cancelled(
-                client
-                    .get(full_url.clone())
-                    .upgrade()
-                    .protocols(vec![ws_protocol])
-                    .send(),
-            )
+            .run_until_cancelled(request.upgrade().protocols(vec![ws_protocol]).send())
             .await
             .context("Session closed while upgrading the Kubernetes websocket")?
             .context("sending websocket request to Kubernetes API")?;

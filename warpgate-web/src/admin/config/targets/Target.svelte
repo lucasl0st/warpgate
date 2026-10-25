@@ -73,6 +73,17 @@
 
     async function update() {
         if (!target) return
+        error = undefined
+        if (target.options.kind === 'Kubernetes') {
+            const identity = target.options.identity
+            if (
+                identity.kind === 'Impersonate' &&
+                (!identity.userPrefix || !identity.groupPrefix)
+            ) {
+                error = 'User prefix and role group prefix must not be empty'
+                return
+            }
+        }
         try {
             if (target.options.kind === 'Http') {
                 target.options.externalHost =
@@ -442,6 +453,38 @@
                                         name: target.name,
                                     }}
                                 />
+                            {/if}
+
+                            <h5 class="mt-3">Upstream identity</h5>
+                            <FormGroup floating label="Identity">
+                                <select
+                                    class="form-control"
+                                    bind:value={target.options.identity.kind}
+                                >
+                                    <option value="Shared">
+                                        Shared (target credential)
+                                    </option>
+                                    <option value="Impersonate">
+                                        Warpgate user and roles
+                                    </option>
+                                </select>
+                            </FormGroup>
+
+                            {#if target.options.identity.kind === 'Impersonate'}
+                                <FormGroup floating label="User prefix">
+                                    <input
+                                        class="form-control"
+                                        bind:value={target.options.identity.userPrefix}
+                                        placeholder="wg-"
+                                    >
+                                </FormGroup>
+                                <FormGroup floating label="Role group prefix">
+                                    <input
+                                        class="form-control"
+                                        bind:value={target.options.identity.groupPrefix}
+                                        placeholder="wg-"
+                                    >
+                                </FormGroup>
                             {/if}
 
                             <TlsConfiguration bind:value={target.options.tls} />

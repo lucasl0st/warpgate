@@ -3,8 +3,11 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Context;
+use http::{HeaderName, HeaderValue};
 use poem::Request;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter, Set,
+};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -13,7 +16,8 @@ use warpgate_aws::EksClusterInfo;
 use warpgate_ca::{deserialize_certificate, serialize_certificate_serial};
 use warpgate_common::auth::{AuthResult, AuthState, AuthStateUserInfo, CredentialKind};
 use warpgate_common::{
-    Protocol, Secret, TargetKubernetesOptions, User, UserSessionId, WarpgateError,
+    KubernetesTargetIdentity, Protocol, Secret, TargetKubernetesOptions, User, UserSessionId,
+    WarpgateError,
 };
 use warpgate_common_http::authorization_token;
 use warpgate_common_http::logging::get_client_ip_addr;
@@ -22,7 +26,7 @@ use warpgate_core::{
     AuthorizedIdentity, ConfigProvider, Services, TargetAuthorization, ValidatedTicket,
     authorize_for_target, validate_ticket, vet_credential_bearer, wait_for_auth_completion,
 };
-use warpgate_db_entities::{CertificateCredential, CertificateRevocation, Parameters};
+use warpgate_db_entities::{CertificateCredential, CertificateRevocation, Parameters, Role};
 
 use crate::server::client_certs::RequestCertificateExt;
 
@@ -186,6 +190,103 @@ pub async fn authorize_kubernetes_target(
     let identity =
         authorize_kubernetes_identity(services, user, client_ip, target_name, session_id).await?;
     lookup_authorized_k8s_target(services.config_provider.as_ref(), target_name, &identity).await
+}
+
+/// The identity a session's requests carry to the cluster.
+#[derive(Debug, Clone)]
+pub enum UpstreamIdentity {
+    /// The target credential's own identity.
+    Shared,
+    /// `Impersonate-User` for the Warpgate user and one `Impersonate-Group`
+    /// per active Warpgate role.
+    Impersonate { user: String, groups: Vec<String> },
+}
+
+impl UpstreamIdentity {
+    /// Resolve the identity from the target's identity config. Active role
+    /// names are read only when impersonation is configured.
+    pub async fn resolve(
+        options: &TargetKubernetesOptions,
+        user_info: &AuthStateUserInfo,
+        db: &DatabaseConnection,
+    ) -> Result<Self, WarpgateError> {
+        match &options.identity {
+            KubernetesTargetIdentity::Shared(_) => Ok(Self::Shared),
+            KubernetesTargetIdentity::Impersonate(identity) => {
+                let user = format!("{}{}", identity.user_prefix, user_info.username);
+                let groups = active_role_names(db, user_info.id)
+                    .await?
+                    .into_iter()
+                    .map(|role| format!("{}{}", identity.group_prefix, role))
+                    .collect::<Vec<_>>();
+
+                // The cluster reserves `system:*` for its internal principals,
+                // whose RBAC an impersonated name would inherit.
+                if in_reserved_namespace(&user)
+                    || groups.iter().any(|group| in_reserved_namespace(group))
+                {
+                    return Err(WarpgateError::InvalidRequest(
+                        "impersonated identity must not use the reserved `system:` namespace"
+                            .into(),
+                    ));
+                }
+
+                Ok(Self::Impersonate { user, groups })
+            }
+        }
+    }
+
+    /// The impersonation headers this identity contributes, or `None` for
+    /// [`Self::Shared`].
+    ///
+    /// All-or-nothing: a request missing even the user header would run as
+    /// the target credential's own identity, which is more privileged than
+    /// the user's, so any value that is not a valid header refuses the whole
+    /// set.
+    pub fn impersonation_headers(
+        &self,
+    ) -> Result<Option<Vec<(HeaderName, HeaderValue)>>, WarpgateError> {
+        let Self::Impersonate { user, groups } = self else {
+            return Ok(None);
+        };
+
+        let user = HeaderValue::from_str(user).map_err(|_| {
+            WarpgateError::InvalidRequest("impersonation user is not a valid header value".into())
+        })?;
+        let mut headers = vec![(HeaderName::from_static("impersonate-user"), user)];
+        for group in groups {
+            let value = HeaderValue::from_str(group).map_err(|_| {
+                WarpgateError::InvalidRequest(
+                    "impersonation group is not a valid header value".into(),
+                )
+            })?;
+            headers.push((HeaderName::from_static("impersonate-group"), value));
+        }
+        Ok(Some(headers))
+    }
+}
+
+/// The names of the user's active (unrevoked, unexpired) Warpgate roles.
+async fn active_role_names(
+    db: &DatabaseConnection,
+    user_id: Uuid,
+) -> Result<Vec<String>, WarpgateError> {
+    let user = warpgate_db_entities::User::Entity::find_by_id(user_id)
+        .one(db)
+        .await?
+        .ok_or_else(|| WarpgateError::UserNotFound(user_id.to_string()))?;
+    Ok(user
+        .find_related(Role::Entity)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|role| role.name)
+        .collect())
+}
+
+/// k8s reserves the `system:` namespace for cluster-internal principals.
+fn in_reserved_namespace(name: &str) -> bool {
+    name.starts_with("system:")
 }
 
 /// Turn a validated Kubernetes identity into an [`AuthorizedIdentity`], applying
@@ -668,11 +769,61 @@ mod tests {
 
     use tokio::net::TcpListener;
 
-    use super::upstream_retry_policy;
+    use super::{UpstreamIdentity, in_reserved_namespace, upstream_retry_policy};
 
     fn client_builder() -> reqwest::ClientBuilder {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         reqwest::Client::builder()
+    }
+
+    #[test]
+    fn impersonation_headers_are_all_or_nothing() {
+        assert!(matches!(
+            UpstreamIdentity::Shared.impersonation_headers(),
+            Ok(None)
+        ));
+
+        let identity = UpstreamIdentity::Impersonate {
+            user: "wg-alice".into(),
+            groups: vec!["wg-dev".into(), "wg-ops".into()],
+        };
+        let headers = identity.impersonation_headers().unwrap().unwrap();
+        assert_eq!(headers.len(), 3);
+        assert_eq!(
+            headers[0].0,
+            http::header::HeaderName::from_static("impersonate-user")
+        );
+        assert_eq!(headers[0].1.to_str().unwrap(), "wg-alice");
+        assert_eq!(
+            headers[1].0,
+            http::header::HeaderName::from_static("impersonate-group")
+        );
+        assert_eq!(headers[1].1.to_str().unwrap(), "wg-dev");
+        assert_eq!(headers[2].1.to_str().unwrap(), "wg-ops");
+
+        // A value that cannot be a header refuses the whole set rather than
+        // sending a partial identity.
+        for identity in [
+            UpstreamIdentity::Impersonate {
+                user: "wg-alice\u{0}".into(),
+                groups: vec![],
+            },
+            UpstreamIdentity::Impersonate {
+                user: "wg-alice".into(),
+                groups: vec!["wg-dev\u{0}".into()],
+            },
+        ] {
+            assert!(identity.impersonation_headers().is_err());
+        }
+    }
+
+    #[test]
+    fn the_reserved_system_namespace_is_detected() {
+        assert!(in_reserved_namespace("system:node"));
+        assert!(in_reserved_namespace("system:kube-controller-manager"));
+        // A prefixed name that merely contains `system:` is not reserved.
+        assert!(!in_reserved_namespace("wg-system:node"));
+        assert!(!in_reserved_namespace("system-node"));
     }
 
     /// Accepts connections and either closes them straight away or holds them

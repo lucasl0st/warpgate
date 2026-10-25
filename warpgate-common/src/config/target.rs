@@ -375,6 +375,9 @@ pub struct TargetKubernetesOptions {
 
     #[serde(default)]
     pub auth: KubernetesTargetAuth,
+
+    #[serde(default)]
+    pub identity: KubernetesTargetIdentity,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Union)]
@@ -401,6 +404,67 @@ impl Default for KubernetesTargetAuth {
     fn default() -> Self {
         Self::Certificate(KubernetesTargetCertificateAuth::default())
     }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Union)]
+#[serde(tag = "kind")]
+#[oai(discriminator_name = "kind", one_of)]
+pub enum KubernetesTargetIdentity {
+    /// Every user's requests carry the target credential's own identity.
+    #[serde(rename = "shared")]
+    Shared(KubernetesTargetSharedIdentity),
+    /// Requests are forwarded with impersonation headers, so the cluster
+    /// sees the Warpgate user and their active Warpgate roles.
+    #[serde(rename = "impersonate")]
+    Impersonate(KubernetesTargetImpersonateIdentity),
+}
+
+impl Default for KubernetesTargetIdentity {
+    fn default() -> Self {
+        Self::Shared(KubernetesTargetSharedIdentity::default())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Object, Default)]
+pub struct KubernetesTargetSharedIdentity {}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Object)]
+pub struct KubernetesTargetImpersonateIdentity {
+    /// Prepended to the Warpgate username; the result is the
+    /// `Impersonate-User` header value. Non-empty, so the forwarded name
+    /// can never be a raw Warpgate name colliding with a cluster principal.
+    #[serde(
+        default = "default_impersonation_prefix",
+        deserialize_with = "deserialize_non_empty_prefix"
+    )]
+    #[oai(validator(min_length = 1))]
+    pub user_prefix: String,
+
+    /// Prepended to each active Warpgate role name; every name becomes one
+    /// `Impersonate-Group` header.
+    #[serde(
+        default = "default_impersonation_prefix",
+        deserialize_with = "deserialize_non_empty_prefix"
+    )]
+    #[oai(validator(min_length = 1))]
+    pub group_prefix: String,
+}
+
+fn default_impersonation_prefix() -> String {
+    "wg-".to_string()
+}
+
+fn deserialize_non_empty_prefix<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let prefix = String::deserialize(deserializer)?;
+    if prefix.is_empty() {
+        return Err(serde::de::Error::custom(
+            "impersonation prefix must not be empty",
+        ));
+    }
+    Ok(prefix)
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Object)]
@@ -619,13 +683,16 @@ impl StoredSecrets for Target {
 #[cfg(test)]
 mod tests {
 
+    use poem_openapi::types::ParseFromJSON;
+
     use super::{
-        DatabaseTargetAuth, DatabaseTargetIamRoleAuth, DatabaseTargetPasswordAuth, MaybeSecretRef,
-        PostgresProtocolVersion, RdpTargetCompression, RdpTlsSecurity, SSHTargetAuth, SecretRef,
-        SshTargetCertificateAuth, SshTargetIamRoleAuth, SshTargetPasswordAuth,
-        SshTargetPublicKeyAuth, Target, TargetHTTPOptions, TargetKubernetesOptions,
-        TargetMySqlOptions, TargetOptions, TargetPostgresOptions, TargetRdpOptions,
-        TargetSSHOptions, Tls,
+        DatabaseTargetAuth, DatabaseTargetIamRoleAuth, DatabaseTargetPasswordAuth,
+        KubernetesTargetIdentity, KubernetesTargetImpersonateIdentity,
+        KubernetesTargetSharedIdentity, MaybeSecretRef, PostgresProtocolVersion,
+        RdpTargetCompression, RdpTlsSecurity, SSHTargetAuth, SecretRef, SshTargetCertificateAuth,
+        SshTargetIamRoleAuth, SshTargetPasswordAuth, SshTargetPublicKeyAuth, Target,
+        TargetHTTPOptions, TargetKubernetesOptions, TargetMySqlOptions, TargetOptions,
+        TargetPostgresOptions, TargetRdpOptions, TargetSSHOptions, Tls,
     };
     use crate::{StoredSecrets, TargetSecrets};
 
@@ -735,6 +802,7 @@ mod tests {
         let mysql: TargetMySqlOptions = serde_json::from_str("{}").unwrap();
         let postgres: TargetPostgresOptions = serde_json::from_str("{}").unwrap();
         let rdp: TargetRdpOptions = serde_json::from_str("{}").unwrap();
+        let kubernetes: TargetKubernetesOptions = serde_json::from_str("{}").unwrap();
 
         assert!(!ssh.allow_insecure_algos);
         assert!(http.headers.is_empty());
@@ -744,6 +812,50 @@ mod tests {
         let empty_password = DatabaseTargetAuth::Password(DatabaseTargetPasswordAuth::default());
         assert_eq!(mysql.auth, empty_password);
         assert_eq!(postgres.auth, empty_password);
+        assert_eq!(
+            kubernetes.identity,
+            KubernetesTargetIdentity::Shared(KubernetesTargetSharedIdentity::default())
+        );
+    }
+
+    #[test]
+    fn a_kubernetes_impersonation_identity_round_trips() {
+        let options: TargetKubernetesOptions = serde_json::from_str(
+            r#"{"identity":{"kind":"impersonate","user_prefix":"wg-","group_prefix":"wg-dev-"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            options.identity,
+            KubernetesTargetIdentity::Impersonate(KubernetesTargetImpersonateIdentity {
+                user_prefix: "wg-".to_string(),
+                group_prefix: "wg-dev-".to_string(),
+            })
+        );
+        let rendered = serde_json::to_value(&options).unwrap();
+        assert_eq!(
+            rendered["identity"],
+            serde_json::json!({"kind": "impersonate", "user_prefix": "wg-", "group_prefix": "wg-dev-"})
+        );
+    }
+
+    #[test]
+    fn an_empty_impersonation_prefix_is_rejected() {
+        for body in [
+            serde_json::json!({"user_prefix": "", "group_prefix": "wg-"}),
+            serde_json::json!({"user_prefix": "wg-", "group_prefix": ""}),
+        ] {
+            assert!(
+                KubernetesTargetImpersonateIdentity::parse_from_json(Some(body.clone())).is_err(),
+                "{body} was accepted"
+            );
+            // The config-file path goes through serde instead.
+            assert!(
+                serde_json::from_value::<KubernetesTargetImpersonateIdentity>(body.clone())
+                    .is_err(),
+                "{body} was accepted by serde"
+            );
+        }
     }
 
     #[test]

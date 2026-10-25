@@ -85,6 +85,11 @@ def _provision_kubernetes_target(processes, shared_wg, label):
                                 kind="Token", token=k3s.token
                             )
                         ),
+                        identity=sdk.KubernetesTargetIdentity(
+                            sdk.KubernetesTargetIdentityKubernetesTargetSharedIdentity(
+                                kind="Shared"
+                            )
+                        ),
                     )
                 ),
             )
@@ -465,6 +470,11 @@ class TestKubernetesIntegration:
                                     kind="Token", token=k3s_token
                                 )
                             ),
+                            identity=sdk.KubernetesTargetIdentity(
+                                sdk.KubernetesTargetIdentityKubernetesTargetSharedIdentity(
+                                    kind="Shared"
+                                )
+                            ),
                         )
                     ),
                 )
@@ -612,6 +622,11 @@ class TestKubernetesIntegration:
                                     kind="Token", token=k3s_token
                                 )
                             ),
+                            identity=sdk.KubernetesTargetIdentity(
+                                sdk.KubernetesTargetIdentityKubernetesTargetSharedIdentity(
+                                    kind="Shared"
+                                )
+                            ),
                         )
                     ),
                 )
@@ -732,6 +747,11 @@ class TestKubernetesIntegration:
                             auth=sdk.KubernetesTargetAuth(
                                 sdk.KubernetesTargetAuthKubernetesTargetTokenAuth(
                                     kind="Token", token=k3s.token
+                                )
+                            ),
+                            identity=sdk.KubernetesTargetIdentity(
+                                sdk.KubernetesTargetIdentityKubernetesTargetSharedIdentity(
+                                    kind="Shared"
                                 )
                             ),
                         )
@@ -915,6 +935,154 @@ class TestKubernetesIntegration:
                         process.communicate()
 
     @pytest.mark.asyncio
+    async def test_kubectl_impersonation_maps_warpgate_roles_to_cluster_groups(
+        self, processes, shared_wg: WarpgateProcess, timeout
+    ):
+        """Impersonation makes requests run as the Warpgate user and roles.
+
+        A Warpgate role bound to a cluster role can list pods; an unbound role
+        cannot, proving requests run under the impersonated identity rather
+        than the target credential's own. A client-supplied impersonation
+        header must not override the identity Warpgate derives."""
+        k3s = processes.shared_k3s()
+        url = f"https://localhost:{shared_wg.http_port}"
+        suffix = uuid.uuid4()
+        bound_role = f"impersonation-bound-{suffix}"
+        unbound_role = f"impersonation-unbound-{suffix}"
+        bound_user = f"user-bound-{suffix}"
+        unbound_user = f"user-unbound-{suffix}"
+        spoofed_user = f"user-spoof-{suffix}"
+        cluster_role = f"wg-e2e-view-{suffix}"
+
+        # The bound group and the spoofed user get a read-only pods role;
+        # everything else stays without cluster access.
+        k3s.kubectl(
+            ["apply", "-f", "-"],
+            input=(
+                "apiVersion: rbac.authorization.k8s.io/v1\n"
+                "kind: ClusterRole\n"
+                "metadata:\n"
+                f"  name: {cluster_role}\n"
+                "rules:\n"
+                "- apiGroups: ['']\n"
+                "  resources: [pods]\n"
+                "  verbs: [get, list]\n"
+                "---\n"
+                "apiVersion: rbac.authorization.k8s.io/v1\n"
+                "kind: ClusterRoleBinding\n"
+                "metadata:\n"
+                f"  name: {cluster_role}-group\n"
+                "roleRef:\n"
+                "  apiGroup: rbac.authorization.k8s.io\n"
+                "  kind: ClusterRole\n"
+                f"  name: {cluster_role}\n"
+                "subjects:\n"
+                "- apiGroup: rbac.authorization.k8s.io\n"
+                "  kind: Group\n"
+                f"  name: wg-{bound_role}\n"
+                "---\n"
+                "apiVersion: rbac.authorization.k8s.io/v1\n"
+                "kind: ClusterRoleBinding\n"
+                "metadata:\n"
+                f"  name: {cluster_role}-spoof\n"
+                "roleRef:\n"
+                "  apiGroup: rbac.authorization.k8s.io\n"
+                "  kind: ClusterRole\n"
+                f"  name: {cluster_role}\n"
+                "subjects:\n"
+                "- kind: User\n"
+                f"  name: wg-{spoofed_user}\n"
+            ).encode(),
+        )
+
+        target_name = f"k8s-impersonation-{suffix}"
+        with admin_client(url) as api:
+            bound = api.create_role(sdk.RoleDataRequest(name=bound_role))
+            unbound = api.create_role(sdk.RoleDataRequest(name=unbound_role))
+            for username, role in (
+                (bound_user, bound),
+                (unbound_user, unbound),
+                (spoofed_user, bound),
+            ):
+                user = api.create_user(sdk.CreateUserRequest(username=username))
+                api.create_password_credential(
+                    user.id, sdk.NewPasswordCredential(password="123")
+                )
+                api.add_user_role(user.id, role.id)
+
+            target = api.create_target(
+                sdk.TargetDataRequest(
+                    name=target_name,
+                    require_approval=False,
+                    ticket_requests_disabled=False,
+                    ticket_require_approval=False,
+                    options=sdk.TargetOptions(
+                        sdk.TargetOptionsTargetKubernetesOptions(
+                            kind="Kubernetes",
+                            cluster_url=f"https://127.0.0.1:{k3s.port}",
+                            tls=sdk.Tls(mode=sdk.TlsMode.PREFERRED, verify=False),
+                            auth=sdk.KubernetesTargetAuth(
+                                sdk.KubernetesTargetAuthKubernetesTargetTokenAuth(
+                                    kind="Token", token=k3s.token
+                                )
+                            ),
+                            identity=sdk.KubernetesTargetIdentity(
+                                sdk.KubernetesTargetIdentityKubernetesTargetImpersonateIdentity(
+                                    kind="Impersonate",
+                                    user_prefix="wg-",
+                                    group_prefix="wg-",
+                                )
+                            ),
+                        )
+                    ),
+                )
+            )
+            api.add_target_role(target.id, bound.id)
+            api.add_target_role(target.id, unbound.id)
+
+        async with aiohttp.ClientSession() as session:
+            tokens = {
+                username: await self._kubectl_token(
+                    session, url, username, shared_wg.http_port
+                )
+                for username in (bound_user, unbound_user)
+            }
+
+            # The bound role's group can list pods ...
+            allowed = self._kubectl_get_pods(
+                shared_wg.kubernetes_port, target_name, tokens[bound_user]
+            )
+            _, err = allowed.communicate(timeout=timeout)
+            assert allowed.returncode == 0, f"the bound role should list pods: {err!r}"
+
+            # ... but the unbound role's identity cannot: the request ran as
+            # the Warpgate user, not as the target credential.
+            denied = self._kubectl_get_pods(
+                shared_wg.kubernetes_port, target_name, tokens[unbound_user]
+            )
+            _, err = denied.communicate(timeout=timeout)
+            assert denied.returncode != 0, "the unbound role should not list pods"
+            assert b"Forbidden" in err, f"expected Forbidden: {err!r}"
+
+            # A client-supplied impersonation header must not replace the
+            # identity Warpgate derives: spoofing the bound principal still
+            # fails for the unbound user.
+            resp = await session.get(
+                f"https://127.0.0.1:{shared_wg.kubernetes_port}/"
+                f"{target_name}/api/v1/namespaces/default/pods",
+                headers={
+                    "Authorization": f"Bearer {tokens[unbound_user]}",
+                    "Impersonate-User": f"wg-{spoofed_user}",
+                },
+                ssl=False,
+            )
+            body = await resp.text()
+            assert resp.status == 403, (
+                f"client impersonation header must not be honoured: "
+                f"{resp.status}: {body[:200]}"
+            )
+
+    @pytest.mark.asyncio
     async def test_kubectl_run(self, processes, shared_wg: WarpgateProcess):
         """Ensure that write requests such as ``kubectl run`` are proxied."""
         k3s, user, target_name, url = _provision_kubernetes_target(
@@ -1000,6 +1168,11 @@ class TestKubernetesIntegration:
                                     kind="Certificate",
                                     certificate=mtls_cert,
                                     private_key=mtls_key,
+                                )
+                            ),
+                            identity=sdk.KubernetesTargetIdentity(
+                                sdk.KubernetesTargetIdentityKubernetesTargetSharedIdentity(
+                                    kind="Shared"
                                 )
                             ),
                         )
@@ -1367,6 +1540,11 @@ class TestKubernetesIntegration:
                                     kind="Token", token=k3s.token
                                 )
                             ),
+                            identity=sdk.KubernetesTargetIdentity(
+                                sdk.KubernetesTargetIdentityKubernetesTargetSharedIdentity(
+                                    kind="Shared"
+                                )
+                            ),
                         )
                     ),
                 )
@@ -1533,6 +1711,11 @@ class TestKubernetesIntegration:
                             auth=sdk.KubernetesTargetAuth(
                                 sdk.KubernetesTargetAuthKubernetesTargetTokenAuth(
                                     kind="Token", token=k3s.token
+                                )
+                            ),
+                            identity=sdk.KubernetesTargetIdentity(
+                                sdk.KubernetesTargetIdentityKubernetesTargetSharedIdentity(
+                                    kind="Shared"
                                 )
                             ),
                         )

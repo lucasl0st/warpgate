@@ -88,6 +88,9 @@
                         certificate: '',
                         privateKey: '',
                     },
+                    identity: {
+                        kind: 'Shared' as const,
+                    },
                 },
                 Vnc: {
                     kind: TargetKind.Vnc,
